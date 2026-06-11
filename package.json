@@ -1,0 +1,13 @@
+{
+  "name": "wa-bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "latest",
+    "@hapi/boom": "latest",
+    "pino": "latest",
+    "axios": "latest"
+  }
+}
