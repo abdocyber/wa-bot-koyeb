@@ -5,6 +5,7 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "express": "latest",
     "@whiskeysockets/baileys": "latest",
     "@hapi/boom": "latest",
     "pino": "latest",
