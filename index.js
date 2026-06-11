@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => { res.send('البوت الذكي يعمل بكفاءة عالية 🚀'); });
+app.get('/', (req, res) => { res.send('البوت الذكي يعمل 🚀'); });
 app.listen(port, () => { console.log(`🌐 خادم الويب يعمل على المنفذ ${port}`); });
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
@@ -10,9 +10,8 @@ const pino = require('pino');
 const fs = require('fs');
 const axios = require('axios');
 
-// ================= 1. الإعدادات والمفاتيح =================
 const botNumber = "584267454399"; 
-const adminNumber = '249121936350'; // رقم المشرف (يجب أن تراسله من هذا الرقم لتظهر لوحة التحكم)
+const adminNumber = '249121936350'; 
 const GROQ_API_KEY = "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"; 
 const ELEVENLABS_API_KEY = "2afb99725e888cd50cac9dc774db408a3a1a05a4c8ab1aa128fb3aacc5121715"; 
 const ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; 
@@ -29,21 +28,20 @@ const queueFile = './pending_questions.json';
 let pendingQueue = fs.existsSync(queueFile) ? JSON.parse(fs.readFileSync(queueFile, 'utf8')) : [];
 function saveQueue() { fs.writeFileSync(queueFile, JSON.stringify(pendingQueue, null, 2)); }
 
-// ================= 2. محرك الذكاء (الخاضع للسيطرة) =================
 async function executeGroqAI(sender, userMessage) {
     if (!userConversations.has(sender)) userConversations.set(sender, []);
     let history = userConversations.get(sender);
 
     if (history.length > 0 && history[history.length - 1].role === "user") history.pop(); 
-    if (history.length > 30) history = history.slice(history.length - 30); 
+    if (history.length > 20) history = history.slice(history.length - 20); 
 
-    // إجبار الذكاء الاصطناعي على طاعتك وعدم الاعتذار أبداً
-    const strictPersona = `أنت صديق دردشة ذكي ومرح. 
-قواعد صارمة جداً:
-1. أنت لست "نافذة دردشة" ولا تعتذر أبداً عن إرسال الصوت. إذا طلب منك المستخدم الغناء أو إرسال مقطع صوتي، وافق فوراً واكتب كلمات الأغنية أو الرد كأنك تتحدث بها، لأنني سأحول كلامك لصوت حقيقي برمجياً.
-2. لا تقل أبداً "لا أستطيع إرسال مقاطع".
-3. تحدث كبشر طبيعي، انسخ أسلوب المستخدم (إذا كان يمزح، امزح معه).
-4. استخدم لغة عربية سليمة ولا تستخدم أي رموز برمجية.`;
+    // تعليمات صارمة جداً لمنع الهلوسة المسرحية وتقليل طول النص
+    const strictPersona = `أنت إنسان طبيعي تدردش على الواتساب.
+ممنوعات صارمة جداً (سيتم إيقافك إذا خالفتها):
+1. ممنوع كتابة أي مؤثرات صوتية بين أقواس مثل (صوت كذا) أو (يضحك).
+2. ممنوع الاعتذار عن إرسال مقاطع صوتية. إذا طُلب منك الغناء أو التحدث بصوت، اكتب الكلام مباشرة فقط.
+3. يجب أن تكون ردودك قصيرة، لا تكتب مقالات أو قصائد طويلة جداً.
+4. تكلم بعفوية وبلغة عربية مفهومة.`;
 
     let messages = [{ role: "system", content: strictPersona }, ...history, { role: "user", content: userMessage }];
 
@@ -51,10 +49,10 @@ async function executeGroqAI(sender, userMessage) {
         let response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
             model: "llama-3.3-70b-versatile", 
             messages: messages,
-            temperature: 0.7 
+            temperature: 0.6 
         }, {
             headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 25000 
+            timeout: 20000 
         });
 
         const aiReply = response.data.choices[0].message.content.trim();
@@ -78,19 +76,24 @@ setInterval(async () => {
     }
 }, 60000);
 
-// ================= 3. محرك الصوت السحابي (مباشر بدون FFMPEG) =================
+// محرك الصوت المطور (يتجاهل الرموز ويولد الصوت مباشرة كرسالة صوتية Voice Note)
 async function generateDirectVoice(text) {
     const tempMp3 = `./voice_${Date.now()}.mp3`;
+    // تنظيف النص من أي أقواس باقية احتياطياً
+    const cleanText = text.replace(/[\(\[].*?[\)\]]/g, '').trim(); 
     try {
         const response = await axios({
             method: 'POST', url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-            data: { text: text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.75 } },
+            data: { text: cleanText, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.75 } },
             headers: { 'accept': 'audio/mpeg', 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
             responseType: 'arraybuffer'
         });
         fs.writeFileSync(tempMp3, response.data);
-        return tempMp3; // إرجاع ملف MP3 مباشرة ليعمل على سيرفرات Render مجاناً
-    } catch (err) { return null; }
+        return tempMp3; 
+    } catch (err) { 
+        console.error('خطأ في ElevenLabs:', err.response ? err.response.data : err.message);
+        return null; 
+    }
 }
 
 async function simulateTypingAndSend(sock, to, text, quotedMsg) {
@@ -100,7 +103,6 @@ async function simulateTypingAndSend(sock, to, text, quotedMsg) {
     await sock.sendMessage(to, { text: text }, quotedMsg ? { quoted: quotedMsg } : {});
 }
 
-// ================= 4. الاتصال والفلترة الصارمة =================
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const sock = makeWASocket({ 
@@ -132,7 +134,6 @@ async function connectToWhatsApp() {
         const msg = m.messages[0];
         if (!msg.message) return; 
 
-        // فلترة رقم المشرف بصرامة (استخراج الأرقام فقط للمطابقة)
         const rawSender = msg.key.remoteJid;
         const cleanNumber = rawSender.replace(/[^0-9]/g, ''); 
         const isAdmin = cleanNumber.includes(adminNumber);
@@ -143,13 +144,15 @@ async function connectToWhatsApp() {
         
         let incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const rawPrompt = incomingText.trim();
-        const isAdminCommand = rawPrompt.startsWith('.'); // الأوامر يجب أن تبدأ بنقطة
+        
+        // نظام تحكم جديد لا يتأثر بمشاكل اللغة العربية (استخدام رمز #)
+        const isAdminCommand = rawPrompt.startsWith('#'); 
 
-        // ------------------ لوحة تحكم المشرف (تعمل فقط بالرقم المحدد وتبدأ بنقطة) ------------------
+        // ------------------ لوحة تحكم المشرف (#) ------------------
         if (isAdmin && !isGroup && isAdminCommand) {
-            const command = rawPrompt.replace('.', '').trim();
+            const command = rawPrompt.replace('#', '').trim();
             if (command === 'تحكم' || command === 'التحكم') {
-                const menu = `🤖 *التحكم الذكي* 🤖\nالحالة: ${isBotActive ? '✅' : '❌'}\n\n.علمني [الكلمة] | [الرد]\n.انسى [الكلمة]\n.الردود\n.إيقاف\n.تشغيل`;
+                const menu = `🤖 *التحكم الذكي* 🤖\nالحالة: ${isBotActive ? '✅' : '❌'}\n\n#علمني [الكلمة] | [الرد]\n#انسى [الكلمة]\n#الردود\n#إيقاف\n#تشغيل`;
                 await sock.sendMessage(sender, { text: menu }); return;
             }
             if (command === 'إيقاف') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ تم الإيقاف.' }); return; }
@@ -177,7 +180,7 @@ async function connectToWhatsApp() {
         if (!isBotActive && !isAdmin) return; 
 
         const finalPromptText = isGroup ? rawPrompt.replace(/^يا بوت/i, '').trim() : rawPrompt;
-        if (!finalPromptText || isAdminCommand) return; // تجاهل أوامر المشرف الخاطئة
+        if (!finalPromptText || isAdminCommand) return; 
 
         try {
             if (!isGroup) { await sock.readMessages([msg.key]); }
@@ -198,16 +201,22 @@ async function connectToWhatsApp() {
                 } else { throw error; }
             }
 
-            // تفعيل الصوت مباشرة عبر ملف MP3
             const wantsVoice = finalPromptText.includes('صوت') || finalPromptText.includes('تكلم') || finalPromptText.includes('اسمعني') || finalPromptText.includes('غني');
             
             if (wantsVoice && !isGroup) {
+                // رسالة تأكيد للمستخدم بأن البوت بدأ التسجيل فعلياً
+                await sock.sendMessage(sender, { text: "🎙️ ثواني، أسجل لك المقطع..." });
                 await sock.sendPresenceUpdate('recording', sender); 
+                
                 const clonedAudio = await generateDirectVoice(aiReply);
                 if (clonedAudio && fs.existsSync(clonedAudio)) {
-                    await sock.sendMessage(sender, { audio: { url: clonedAudio }, mimetype: 'audio/mpeg' }, { quoted: msg });
+                    // إرسال كرسالة صوتية (Voice Note) وليس مجرد ملف
+                    await sock.sendMessage(sender, { audio: { url: clonedAudio }, mimetype: 'audio/mpeg', ptt: true }, { quoted: msg });
                     fs.unlinkSync(clonedAudio); 
-                } else { await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null); }
+                } else { 
+                    // في حال نفذ رصيد ElevenLabs أو حدث خطأ، سيعتذر ويرسل النص
+                    await sock.sendMessage(sender, { text: "⚠️ عذراً، محرك الصوت توقف حالياً (ربما النص طويل جداً أو نفذ الرصيد المجاني). إليك ردي النصي:\n\n" + aiReply }, { quoted: msg });
+                }
             } else {
                 await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null);
             }
