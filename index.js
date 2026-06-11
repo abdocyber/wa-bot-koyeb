@@ -1,10 +1,18 @@
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+// خادم ويب وهمي لإقناع Render بأن البوت عبارة عن موقع ويب مستقر
+app.get('/', (req, res) => { res.send('البوت الذكي يعمل بكفاءة عالية جداً 🚀'); });
+app.listen(port, () => { console.log(`🌐 خادم الويب يعمل على المنفذ المخصص ${port}`); });
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const axios = require('axios');
 const { exec } = require('child_process');
 
-// ================= 1. الإعدادات الأساسية =================
+// ================= 1. الإعدادات الأساسية والمفاتيح =================
 const botNumber = "584267454399"; 
 const adminNumber = '249121936350'; 
 const GROQ_API_KEY = "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"; 
@@ -15,7 +23,7 @@ let globalSock = null;
 const userConversations = new Map();
 let isBotActive = true; 
 
-// ================= 2. قاعدة بيانات التعلم =================
+// ================= 2. قاعدة بيانات الردود والانتظار =================
 const repliesFile = './custom_replies.json';
 let customReplies = fs.existsSync(repliesFile) ? JSON.parse(fs.readFileSync(repliesFile, 'utf8')) : [];
 function saveReplies() { fs.writeFileSync(repliesFile, JSON.stringify(customReplies, null, 2)); }
@@ -24,32 +32,34 @@ const queueFile = './pending_questions.json';
 let pendingQueue = fs.existsSync(queueFile) ? JSON.parse(fs.readFileSync(queueFile, 'utf8')) : [];
 function saveQueue() { fs.writeFileSync(queueFile, JSON.stringify(pendingQueue, null, 2)); }
 
-// ================= 3. محرك الذكاء الاصطناعي (مضاد للهلوسة) =================
+// ================= 3. محرك الردود الذكي والتأقلم مع السياق =================
 async function executeGroqAI(sender, userMessage) {
     if (!userConversations.has(sender)) userConversations.set(sender, []);
     let history = userConversations.get(sender);
 
-    if (history.length > 0 && history[history.length - 1].role === "user") history.pop(); 
+    // التحقق لمنع تكرار نصوص العميل المتتالية وحظر الـ 400
+    if (history.length > 0 && history[history.length - 1].role === "user") {
+        history.pop(); 
+    }
     if (history.length > 30) history = history.slice(history.length - 30); 
 
-    const smartPersona = `أنت صديق دردشة ووكيل ذكي جداً، عفوي، ومريح في التعامل.
+    const naturalPersona = `أنت صديق دردشة ووكيل ذكي جداً، عفوي، ومريح في التعامل.
 قواعدك الأساسية والصارمة:
-1. تحدث باللغة العربية فقط. يمنع منعاً باتاً استخدام لغات أخرى (كالصينية أو الإنجليزية) أو أي رموز غريبة.
-2. اقرأ سياق المحادثة السابقة جيداً وانسخ أسلوب المستخدم: إذا مزح فامزح، وإذا سأل سؤالاً جدياً فأجب بجدية واحترافية.
-3. تجنب الردود الطويلة جداً والمملة، كن مباشرة وطبيعياً كأنك إنسان يدردش على واتساب.
-4. إذا طلب منك التحدث عن شيء خارج العمل، دردش معه بكل أريحية وذكاء.
-5. لا تقل أبداً أنك ذكاء اصطناعي، ولا تستخدم أي أقواس برمجية في ردودك.`;
+1. تحدث باللغة العربية المفهومة فقط. يمنع منعاً باتاً استخدام لغات أخرى أو رموز غريبة غير مفهومة.
+2. اقرأ سياق المحادثة السابقة جيداً وانسخ أسلوب المستخدم: إذا مزح فامزح معه، وإذا كان جدياً فأجب بجدية واحترافية.
+3. كن مباشراً وطبيعياً كأنك شخص حقيقي يدردش على الواتساب الآن.
+4. لا تقل أبداً أنك ذكاء اصطناعي، ولا تستخدم أي أقواس برمجية في ردودك نهائياً.`;
 
-    let messages = [{ role: "system", content: smartPersona }, ...history, { role: "user", content: userMessage }];
+    let messages = [{ role: "system", content: naturalPersona }, ...history, { role: "user", content: userMessage }];
 
     try {
         let response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
             model: "llama-3.3-70b-versatile", 
             messages: messages,
-            temperature: 0.6 
+            temperature: 0.65 
         }, {
             headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 20000 
+            timeout: 25000 
         });
 
         const aiReply = response.data.choices[0].message.content.trim();
@@ -61,6 +71,7 @@ async function executeGroqAI(sender, userMessage) {
     } catch (error) { throw error; }
 }
 
+// محرك فحص ومعالجة طابور الرسائل في الخلفية
 setInterval(async () => {
     if (pendingQueue.length === 0 || !globalSock || !isBotActive) return;
     const item = pendingQueue[0]; 
@@ -70,12 +81,12 @@ setInterval(async () => {
         pendingQueue.shift(); saveQueue();
     } catch (error) {
         if (error.response && error.response.status === 429) {
-            console.log(`[زحام] تأجيل الإرسال...`);
+            console.log(`[زحام] تأجيل الإرسال لدقيقة...`);
         } else { pendingQueue.shift(); saveQueue(); }
     }
 }, 60000);
 
-// ================= 4. محرك الصوت والإرسال =================
+// ================= 4. محركات معالجة الصوت والكتابة التلقائية =================
 async function generateClonedVoice(text, outputFile) {
     const tempMp3 = `./temp_voice_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp3`;
     try {
@@ -101,7 +112,7 @@ async function simulateTypingAndSend(sock, to, text, quotedMsg) {
     await sock.sendMessage(to, { text: text }, quotedMsg ? { quoted: quotedMsg } : {});
 }
 
-// ================= 5. الاتصال القوي وإدارة الأوامر =================
+// ================= 5. معالجة اتصال واتساب والأوامر الذكية =================
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const sock = makeWASocket({ 
@@ -114,16 +125,17 @@ async function connectToWhatsApp() {
     });
     globalSock = sock; 
 
+    // طباعة كود الربط المكون من 8 أرقام بوضوح في سجلات Render
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
                 const phoneNumber = botNumber.replace(/[^0-9]/g, '');
                 const code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n======================================================`);
-                console.log(`🚨 كود الربط الخاص بك هو: ${code}`);
+                console.log(`🚨 كود الربط الخاص بك على ريندر هو: ${code}`);
                 console.log(`======================================================\n`);
-            } catch (err) {}
-        }, 3000);
+            } catch (err) { console.log('خطأ استخراج الكود:', err); }
+        }, 5000);
     }
 
     sock.ev.on('creds.update', saveCreds);
@@ -133,7 +145,7 @@ async function connectToWhatsApp() {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) connectToWhatsApp();
         } else if (connection === 'open') {
-            console.log('\n✅ تم الربط بنجاح! البوت مستقر وجاهز للعمل.\n');
+            console.log('\n✅ تم الربط بنجاح! البوت مستقر ويعمل في السحابة الآن.\n');
         }
     });
 
@@ -155,7 +167,7 @@ async function connectToWhatsApp() {
         // ------------------ لوحة تحكم المشرف ------------------
         if (isAdmin && !isGroup) {
             if (normalizedPrompt === 'التحكم' || normalizedPrompt === 'تحكم') {
-                const menu = `🤖 *لوحة التحكم الذكية* 🤖\n\nحالة البوت: ${isBotActive ? '✅ يعمل' : '❌ متوقف'}\n\n🎓 *للتعليم السريع:*\nعلمني [الكلمة] | [الرد]\n\n🗑️ *للحذف:*\nانسى [الكلمة]\n\n📋 *لعرض الردود:*\nالردود\n\n⏸️ *لإيقاف الذكاء الاصطناعي:*\nإيقاف\n\n▶️ *للتشغيل:*\nتشغيل`;
+                const menu = `🤖 *لوحة التحكم الذكية* 🤖\n\nحالة البوت: ${isBotActive ? '✅ يعمل' : '❌ متوقف'}\n\n🎓 *للتعليم السريع:*\nعلمني [الكلمة] | [الرد]\n\n🗑️ *للحذف:*\nانسى [الكلمة]\n\n📋 *لعرض الردود:*\nالردود\n\n⏸️ *إيقاف البوت:*\nإيقاف\n\n▶️ *تشغيل البوت:*\nتشغيل`;
                 await sock.sendMessage(sender, { text: menu }); return;
             }
             if (normalizedPrompt === 'إيقاف' || normalizedPrompt === 'ايقاف') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ تم الإيقاف.' }); return; }
@@ -182,7 +194,7 @@ async function connectToWhatsApp() {
                 const targetTrigger = normalizedPrompt.replace(/^انسى\s+|^إنسى\s+/, '').trim();
                 customReplies = customReplies.filter(r => r.trigger !== targetTrigger);
                 saveReplies();
-                await sock.sendMessage(sender, { text: `🗑️ تم مسح الكلمة.` }); return;
+                await sock.sendMessage(sender, { text: `🗑️ تم مسح الكلمة من الذاكرة.` }); return;
             }
         }
 
@@ -195,12 +207,14 @@ async function connectToWhatsApp() {
         try {
             if (!isGroup) { await sock.readMessages([msg.key]); }
 
+            // التحقق من قائمة الردود السريعة التي تم تعليمها للبوت
             const foundCustomReply = customReplies.find(r => finalPromptText.includes(r.trigger));
             if (foundCustomReply) {
                 await simulateTypingAndSend(sock, sender, foundCustomReply.reply, isGroup ? msg : null);
                 return; 
             }
 
+            // الاستجابة عبر محرك الذكاء الاصطناعي
             let aiReply;
             try {
                 aiReply = await executeGroqAI(sender, finalPromptText);
@@ -211,6 +225,7 @@ async function connectToWhatsApp() {
                 } else { throw error; }
             }
 
+            // التحقق من النية لإرسال مقطع صوتي تلقائي
             const wantsVoice = finalPromptText.includes('صوت') || finalPromptText.includes('تكلم') || finalPromptText.includes('اسمعني');
             
             if (wantsVoice && !isGroup) {
@@ -225,7 +240,7 @@ async function connectToWhatsApp() {
                 await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null);
             }
 
-        } catch (error) { console.error('خطأ في معالجة الرسالة:', error.message); }
+        } catch (error) { console.error('خطأ في معالجة الرسالة بالتفصيل:', error.message); }
     });
 }
 connectToWhatsApp();
