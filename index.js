@@ -14,7 +14,7 @@ const botNumber = "584267454399";
 const adminNumber = '249121936350'; // تأكد أن هذا هو رقمك الذي تراسله منه
 const GROQ_API_KEY = "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"; 
 const ELEVENLABS_API_KEY = "2afb99725e888cd50cac9dc774db408a3a1a05a4c8ab1aa128fb3aacc5121715"; 
-const ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; 
+const ELEVENLABS_VOICE_ID = "jAAHNNqlbAX9iWjJPEtE"; 
 
 let globalSock = null; 
 const userConversations = new Map();
