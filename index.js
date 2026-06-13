@@ -181,7 +181,7 @@ async function executeBroadcast(sock, message) {
 // ================= 6. الجلسات المتعددة وفلاتر الحماية =================
 async function connectInstance(phoneNumber, notifyJid = null) {
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    const sessionFolder = `auth_info_${cleanNumber}`;
+    const sessionFolder = `session_secure_${cleanNumber}`;
     
     const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
     const sock = makeWASocket({
