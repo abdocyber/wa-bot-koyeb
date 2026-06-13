@@ -2,15 +2,17 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// ================= 1. خادم الويب والمراقبة =================
 app.get('/', (req, res) => { res.send('مصفوفة البوتات المتعددة تعمل بكفاءة سحابية 🚀'); });
 app.listen(port, () => { console.log(`🌐 خادم الويب يعمل على المنفذ ${port}`); });
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, delay } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const axios = require('axios');
+const path = require('path');
 
-// ================= 1. الإعدادات الأساسية والمفاتيح =================
+// ================= 2. الإعدادات الأساسية والمفاتيح =================
 const GROQ_API_KEY = "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"; 
 const ELEVENLABS_API_KEY = "2afb99725e888cd50cac9dc774db408a3a1a05a4c8ab1aa128fb3aacc5121715"; 
 const ELEVENLABS_VOICE_ID = "jAAHNNqlbAX9iWjJPEtE"; 
@@ -22,24 +24,24 @@ const lastUserQuestion = new Map();
 let isBotActive = true; 
 let selfLearnEnabled = true;
 
-// 🛡️ نظام المشرفين الذكي الجديد
-const adminsFile = './admins.json';
-let adminNumbers = fs.existsSync(adminsFile) ? JSON.parse(fs.readFileSync(adminsFile, 'utf8')) : ['249121936350'];
-function saveAdmins() { fs.writeFileSync(adminsFile, JSON.stringify(adminNumbers, null, 2)); }
+// 🛡️ نظام إدارة البيانات
+const DATA_DIR = './data';
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
-const numbersFile = './connected_numbers.json';
-let connectedNumbers = fs.existsSync(numbersFile) ? JSON.parse(fs.readFileSync(numbersFile, 'utf8')) : [];
-function saveNumbers() { fs.writeFileSync(numbersFile, JSON.stringify(connectedNumbers, null, 2)); }
+const loadJSON = (file, defaultData) => {
+    const filePath = path.join(DATA_DIR, file);
+    return fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, 'utf8')) : defaultData;
+};
+const saveJSON = (file, data) => fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 
-const repliesFile = './custom_replies.json';
-let customReplies = fs.existsSync(repliesFile) ? JSON.parse(fs.readFileSync(repliesFile, 'utf8')) : [];
-function saveReplies() { fs.writeFileSync(repliesFile, JSON.stringify(customReplies, null, 2)); }
+let adminNumbers = loadJSON('admins.json', ['249121936350']);
+let connectedNumbers = loadJSON('connected_numbers.json', []);
+let customReplies = loadJSON('custom_replies.json', []);
+let pendingQueue = loadJSON('pending_queue.json', []);
+let learnedQA = loadJSON('learned_qa.json', []);
+let knownChats = loadJSON('known_chats.json', []);
 
-const queueFile = './pending_questions.json';
-let pendingQueue = fs.existsSync(queueFile) ? JSON.parse(fs.readFileSync(queueFile, 'utf8')) : [];
-function saveQueue() { fs.writeFileSync(queueFile, JSON.stringify(pendingQueue, null, 2)); }
-
-// ================= 2. دالة حساب التشابه =================
+// ================= 3. دالة حساب التشابه والتعلم =================
 function getSimilarity(str1, str2) {
     const s1 = str1.toLowerCase().replace(/\s+/g, '');
     const s2 = str2.toLowerCase().replace(/\s+/g, '');
@@ -63,53 +65,32 @@ function getSimilarity(str1, str2) {
     return (2.0 * intersection) / (s1.length + s2.length - 2);
 }
 
-// ================= 3. التعلم الذاتي =================
 function learnManualQA(question, answer) {
     if (!selfLearnEnabled || !question || !answer) return;
-    let learned = fs.existsSync('./learned_qa.json') ? JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8')) : [];
     let found = false;
-    for (let item of learned) {
+    for (let item of learnedQA) {
         if (getSimilarity(item.question, question) > 0.85) {
             item.answer = answer; found = true; break;
         }
     }
-    if (!found) learned.push({ question, answer, usageCount: 1 });
-    learned.sort((a, b) => b.usageCount - a.usageCount);
-    if (learned.length > 500) learned = learned.slice(0, 500);
-    fs.writeFileSync('./learned_qa.json', JSON.stringify(learned, null, 2));
+    if (!found) learnedQA.push({ question, answer, usageCount: 1 });
+    learnedQA.sort((a, b) => b.usageCount - a.usageCount);
+    if (learnedQA.length > 500) learnedQA = learnedQA.slice(0, 500);
+    saveJSON('learned_qa.json', learnedQA);
 }
 
 function checkLearnedQA(question) {
-    if (!fs.existsSync('./learned_qa.json')) return null;
-    let learned = JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8'));
-    for (let item of learned) {
+    for (let item of learnedQA) {
         if (getSimilarity(item.question, question) > 0.80) {
             item.usageCount++;
-            fs.writeFileSync('./learned_qa.json', JSON.stringify(learned, null, 2));
+            saveJSON('learned_qa.json', learnedQA);
             return item.answer;
         }
     }
     return null;
 }
 
-function getOwnerStyleGuide() {
-    if (!fs.existsSync('./learned_qa.json')) return "";
-    let learned = JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8'));
-    if (learned.length === 0) return "";
-    let samples = learned.slice(0, 10).map(item => `- سأل العميل: "${item.question}" -> فكان ردك: "${item.answer}"`).join('\n');
-    return `\nدليل إرشادي لنبرة الحساب الحقيقي:\n${samples}`;
-}
-
-function trackChat(jid) {
-    if (!jid || jid.endsWith('@g.us')) return; 
-    let chats = fs.existsSync('./known_chats.json') ? JSON.parse(fs.readFileSync('./known_chats.json', 'utf8')) : [];
-    if (!chats.includes(jid)) {
-        chats.push(jid);
-        fs.writeFileSync('./known_chats.json', JSON.stringify(chats, null, 2));
-    }
-}
-
-// ================= 4. محرك الذكاء الاصطناعي =================
+// ================= 4. محرك الذكاء الاصطناعي والصوت =================
 async function executeGroqAI(sender, userMessage) {
     if (!userConversations.has(sender)) userConversations.set(sender, []);
     let history = userConversations.get(sender);
@@ -119,22 +100,17 @@ async function executeGroqAI(sender, userMessage) {
 
     const LONG_ANSWER_HINTS = ['اشرح', 'تفصيل', 'قصة', 'أغنية', 'اغنيه', 'غني', 'وصف', 'وضح', 'لماذا', 'كيف'];
     const needsLongAnswer = LONG_ANSWER_HINTS.some(hint => userMessage.toLowerCase().includes(hint));
-    const maxTokens = needsLongAnswer ? 1024 : 200;
+    
+    let samples = learnedQA.slice(0, 10).map(item => `- سأل العميل: "${item.question}" -> فكان ردك: "${item.answer}"`).join('\n');
+    const ownerStyleGuide = samples ? `\nدليل إرشادي لنبرة الحساب الحقيقي:\n${samples}` : "";
 
-    const ownerStyleGuide = getOwnerStyleGuide();
-
-    const strictPersona = `أنت صديق دردشة بشري حقيقي وعفوي يدردش مع أصحابه على الواتساب.
-1. ردودك قصيرة جداً ومباشرة (سطر أو سطرين فقط).
-2. تحدث بلهجة عربية عامية وعفوية تماماً تطابق السائل.
-3. ممنوع نهائياً كتابة مؤثرات بين أقواس مثل (يضحك) أو (صوت).
-4. لا تعتذر عن إرسال الصوتيات، اكتب الكلمات مباشرة وسيتولى النظام تحويلها.
-${ownerStyleGuide}`;
+    const strictPersona = `أنت صديق دردشة بشري حقيقي وعفوي يدردش مع أصحابه على الواتساب.\n1. ردودك قصيرة جداً ومباشرة (سطر أو سطرين فقط).\n2. تحدث بلهجة عربية عامية وعفوية تماماً تطابق السائل.\n3. ممنوع نهائياً كتابة مؤثرات بين أقواس مثل (يضحك) أو (صوت).\n4. لا تعتذر عن إرسال الصوتيات، اكتب الكلمات مباشرة وسيتولى النظام تحويلها.\n${ownerStyleGuide}`;
 
     let messages = [{ role: "system", content: strictPersona }, ...history, { role: "user", content: userMessage }];
 
     try {
         let response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-            model: "llama-3.3-70b-versatile", messages, temperature: 0.75, max_tokens: maxTokens
+            model: "llama-3.3-70b-versatile", messages, temperature: 0.75, max_tokens: needsLongAnswer ? 1024 : 200
         }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 20000 });
         const aiReply = response.data.choices[0].message.content.trim();
         history.push({ role: "user", content: userMessage });
@@ -143,9 +119,7 @@ ${ownerStyleGuide}`;
     } catch (error) { throw error; }
 }
 
-// ================= 5. الصوتيات والبث =================
-async function generateDirectVoice(text) {
-    const tempMp3 = `./voice_${Date.now()}.mp3`;
+async function generateAndSendVoice(sock, to, text, quotedMsg) {
     const cleanText = text.replace(/[\(\[].*?[\)\]]/g, '').trim(); 
     try {
         const response = await axios({
@@ -154,34 +128,32 @@ async function generateDirectVoice(text) {
             headers: { 'accept': 'audio/mpeg', 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
             responseType: 'arraybuffer'
         });
-        fs.writeFileSync(tempMp3, response.data); return tempMp3; 
-    } catch (err) { return "QUOTA_EXCEEDED"; }
+        
+        const tempMp3 = path.join(DATA_DIR, `voice_${Date.now()}.mp3`);
+        fs.writeFileSync(tempMp3, response.data);
+        
+        await sock.sendPresenceUpdate('recording', to);
+        await delay(2000);
+        await sock.sendMessage(to, { audio: { url: tempMp3 }, mimetype: 'audio/mpeg', ptt: true }, { quoted: quotedMsg });
+        
+        if (fs.existsSync(tempMp3)) fs.unlinkSync(tempMp3); 
+    } catch (err) {
+        console.error('Voice generation error:', err.message);
+        await sock.sendMessage(to, { text: text }, { quoted: quotedMsg });
+    }
 }
 
 async function simulateTypingAndSend(sock, to, text, quotedMsg) {
-    const delay = Math.max(1000, Math.min(3000, text.split(/\s+/).length * 150)); 
+    const typingDelay = Math.max(1000, Math.min(3000, text.split(/\s+/).length * 150)); 
     await sock.sendPresenceUpdate('composing', to);
-    await new Promise(resolve => setTimeout(resolve, delay));
+    await delay(typingDelay);
     await sock.sendMessage(to, { text: text }, quotedMsg ? { quoted: quotedMsg } : {});
 }
 
-async function executeBroadcast(sock, message) {
-    if (!fs.existsSync('./known_chats.json')) return { success: 0, total: 0 };
-    let chats = JSON.parse(fs.readFileSync('./known_chats.json', 'utf8'));
-    let successCount = 0;
-    for (let chat of chats) {
-        try {
-            await new Promise(resolve => setTimeout(resolve, 3500));
-            await sock.sendMessage(chat, { text: message }); successCount++;
-        } catch (err) { }
-    }
-    return { success: successCount, total: chats.length };
-}
-
-// ================= 6. الجلسات المتعددة وفلاتر الحماية =================
+// ================= 5. الجلسات والاتصال =================
 async function connectInstance(phoneNumber, notifyJid = null) {
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    const sessionFolder = `session_secure_${cleanNumber}`;
+    const sessionFolder = path.join(DATA_DIR, `auth_info_${cleanNumber}`);
     
     const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
     const sock = makeWASocket({
@@ -191,33 +163,6 @@ async function connectInstance(phoneNumber, notifyJid = null) {
 
     activeSocks.set(cleanNumber, sock);
 
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(cleanNumber);
-                
-                console.log(`\n======================================================`);
-                console.log(`🚨 كود الربط للرقم [${cleanNumber}] هو: ${code} 🚨`);
-                console.log(`======================================================\n`);
-
-                if (notifyJid) {
-                    let connectedSock = null;
-                    for (let [num, activeSock] of activeSocks.entries()) {
-                        if (activeSock.authState.creds.registered) {
-                            connectedSock = activeSock; break;
-                        }
-                    }
-
-                    if (connectedSock) {
-                        await connectedSock.sendMessage(notifyJid, {
-                            text: `🔑 *كود الربط للحساب الجديد:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*`
-                        });
-                    }
-                }
-            } catch (err) { }
-        }, 6000); 
-    }
-
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
@@ -226,20 +171,31 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             if (shouldReconnect) connectInstance(cleanNumber);
         } else if (connection === 'open') {
             if (!connectedNumbers.includes(cleanNumber)) {
-                connectedNumbers.push(cleanNumber); saveNumbers();
+                connectedNumbers.push(cleanNumber); saveJSON('connected_numbers.json', connectedNumbers);
+            }
+            console.log(`✅ تم فتح اتصال الرقم: ${cleanNumber}`);
+        }
+        
+        if (update.qr) {
+            const code = await sock.requestPairingCode(cleanNumber);
+            console.log(`🚨 كود الربط للرقم [${cleanNumber}] هو: ${code}`);
+            if (notifyJid) {
+                for (let [num, s] of activeSocks.entries()) {
+                    if (s.authState.creds.registered) {
+                        await s.sendMessage(notifyJid, { text: `🔑 *كود الربط للحساب الجديد:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*` });
+                        break;
+                    }
+                }
             }
         }
     });
 
     sock.ev.on('messages.upsert', async m => {
-        const msg = m.messages[0]; if (!msg.message) return; 
+        const msg = m.messages[0]; if (!msg.message || msg.key.remoteJid === 'status@broadcast') return; 
 
         const rawSender = msg.key.remoteJid;
         const senderNumber = rawSender.split('@')[0].replace(/[^0-9]/g, ''); 
-        
-        // التحقق الذكي من المشرف (يطابق الرقم المحفوظ في الذاكرة بدقة)
-        let isAdmin = adminNumbers.some(num => senderNumber.includes(num));
-        
+        const isAdmin = adminNumbers.includes(senderNumber);
         const sender = rawSender.includes(':') ? rawSender.split(':')[0] + '@s.whatsapp.net' : rawSender;
         const isFromMe = msg.key.fromMe;
         const isGroup = rawSender.endsWith('@g.us'); 
@@ -247,14 +203,9 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         let incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const rawPrompt = incomingText.trim();
 
-        // 🛡️ [الباب السري لتسجيل المشرف الجديد]
-        if (rawPrompt === 'تفعيل المشرف') {
-            if (!isAdmin) {
-                adminNumbers.push(senderNumber);
-                saveAdmins();
-                isAdmin = true;
-            }
-            await sock.sendMessage(sender, { text: '✅ تم تسجيل رقمك كمسؤول بنجاح! أرسل الآن كلمة (المدير) لفتح لوحة التحكم.' });
+        if (rawPrompt === 'تفعيل المشرف' && !isAdmin) {
+            adminNumbers.push(senderNumber); saveJSON('admins.json', adminNumbers);
+            await sock.sendMessage(sender, { text: '✅ تم تسجيلك كمسؤول بنجاح! أرسل (المدير) لفتح لوحة التحكم.' });
             return;
         }
 
@@ -264,95 +215,106 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             return;
         }
 
-        if (!isGroup && !isFromMe) { trackChat(sender); lastUserQuestion.set(sender, rawPrompt); }
+        if (!isGroup && !isFromMe) { 
+            if (!knownChats.includes(sender)) { knownChats.push(sender); saveJSON('known_chats.json', knownChats); }
+            lastUserQuestion.set(sender, rawPrompt); 
+        }
 
         if (isAdmin && !isGroup) {
-            if (rawPrompt === 'المدير' || rawPrompt === 'تحكم' || rawPrompt === 'التحكم' || rawPrompt === 'لوحة التحكم') {
-                let learnedCount = fs.existsSync('./learned_qa.json') ? JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8')).length : 0;
-                const menu = `🛠️ *لوحة التحكم* 🛠️\nالحالة: ${isBotActive ? '✅' : '❌'}\nالتعلم: ${selfLearnEnabled ? '🔄' : '⏸️'}\nالردود: *${learnedCount}*\n\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\n\nاضافة [الرقم]\nاذاعة [الرسالة]\nعلمني [السؤال]|[الرد]\nانسى [الكلمة]`;
+            // --- لوحة التحكم ---
+            if (['المدير', 'تحكم', 'التحكم', 'لوحة التحكم'].includes(rawPrompt)) {
+                const menu = `🛠️ *لوحة التحكم المتقدمة* 🛠️\n\n*الحالة:* ${isBotActive ? '✅ يعمل' : '❌ متوقف'}\n*التعلم:* ${selfLearnEnabled ? '🔄 مفعل' : '⏸️ متوقف'}\n*الردود:* ${learnedQA.length}\n*البوتات:* ${connectedNumbers.length}\n\n*الأوامر:*\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\n\nاضافة [الرقم] | حذف رقم [الرقم]\nاضافة مشرف [الرقم] | حذف مشرف [الرقم]\nعرض الأرقام | عرض المشرفين | عرض الردود\nعلمني [سؤال]|[جواب] | انسى [كلمة]\nاذاعة [رسالة]`;
                 await sock.sendMessage(sender, { text: menu }); return;
             }
-            if (rawPrompt === '1') { isBotActive = true; await sock.sendMessage(sender, { text: '✅ تشغيل' }); return; }
-            if (rawPrompt === '2') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ إيقاف' }); return; }
-            if (rawPrompt === '3') { selfLearnEnabled = true; await sock.sendMessage(sender, { text: '🔄 تعلم مفعل' }); return; }
-            if (rawPrompt === '4') { selfLearnEnabled = false; await sock.sendMessage(sender, { text: '⏸️ تعلم متوقف' }); return; }
-            if (rawPrompt === '5') { fs.writeFileSync('./learned_qa.json', JSON.stringify([], null, 2)); await sock.sendMessage(sender, { text: '🗑️ مسح الذاكرة' }); return; }
+            if (rawPrompt === '1') { isBotActive = true; await sock.sendMessage(sender, { text: '✅ تم التشغيل' }); return; }
+            if (rawPrompt === '2') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ تم الإيقاف' }); return; }
+            if (rawPrompt === '3') { selfLearnEnabled = true; await sock.sendMessage(sender, { text: '🔄 التعلم مفعل' }); return; }
+            if (rawPrompt === '4') { selfLearnEnabled = false; await sock.sendMessage(sender, { text: '⏸️ التعلم متوقف' }); return; }
+            if (rawPrompt === '5') { learnedQA = []; saveJSON('learned_qa.json', []); await sock.sendMessage(sender, { text: '🗑️ تم تصفير الذاكرة' }); return; }
+            
             if (rawPrompt.startsWith('اضافة ')) { connectInstance(rawPrompt.replace('اضافة ', '').replace(/[^0-9]/g, ''), sender); return; }
-            if (rawPrompt.startsWith('اذاعة ')) { executeBroadcast(sock, rawPrompt.replace('اذاعة ', '').trim()); await sock.sendMessage(sender, { text: `📢 جاري البث...` }); return; }
+            if (rawPrompt.startsWith('حذف رقم ')) {
+                const num = rawPrompt.replace('حذف رقم ', '').replace(/[^0-9]/g, '');
+                connectedNumbers = connectedNumbers.filter(n => n !== num); saveJSON('connected_numbers.json', connectedNumbers);
+                if (activeSocks.has(num)) { activeSocks.get(num).end(); activeSocks.delete(num); }
+                await sock.sendMessage(sender, { text: `✅ تم حذف الرقم ${num}` }); return;
+            }
+            if (rawPrompt.startsWith('اذاعة ')) {
+                const msgText = rawPrompt.replace('اذاعة ', '').trim();
+                let count = 0;
+                for (const chat of knownChats) {
+                    try { await delay(3000); await sock.sendMessage(chat, { text: msgText }); count++; } catch (e) {}
+                }
+                await sock.sendMessage(sender, { text: `📢 تم الإرسال إلى ${count} دردشة.` }); return;
+            }
             if (rawPrompt.startsWith('علمني ')) {
-                const data = rawPrompt.replace('علمني ', '').split('|'); if (data.length < 2) return;
-                customReplies = customReplies.filter(r => r.trigger !== data[0].trim());
-                customReplies.push({ trigger: data[0].trim(), reply: data[1].trim() }); saveReplies();
-                await sock.sendMessage(sender, { text: `✅ تم` }); return;
+                const parts = rawPrompt.replace('علمني ', '').split('|');
+                if (parts.length === 2) {
+                    customReplies = customReplies.filter(r => r.trigger !== parts[0].trim());
+                    customReplies.push({ trigger: parts[0].trim(), reply: parts[1].trim() });
+                    saveJSON('custom_replies.json', customReplies);
+                    await sock.sendMessage(sender, { text: '✅ تم الحفظ' });
+                }
+                return;
             }
             if (rawPrompt.startsWith('انسى ')) {
-                customReplies = customReplies.filter(r => r.trigger !== rawPrompt.replace('انسى ', '').trim()); saveReplies();
-                await sock.sendMessage(sender, { text: `🗑️ مسح` }); return;
+                const trigger = rawPrompt.replace('انسى ', '').trim();
+                customReplies = customReplies.filter(r => r.trigger !== trigger);
+                saveJSON('custom_replies.json', customReplies);
+                await sock.sendMessage(sender, { text: '🗑️ تم المسح' }); return;
+            }
+            if (rawPrompt === 'عرض الردود') {
+                const text = customReplies.map(r => `• *${r.trigger}:* ${r.reply}`).join('\n') || 'لا توجد ردود.';
+                await sock.sendMessage(sender, { text: `*الردود المخصصة:*\n${text}` }); return;
             }
         }
 
+        // --- معالجة الرسائل للمستخدمين ---
         if (isFromMe || (!isBotActive && !isAdmin)) return; 
 
         if (isGroup) {
-            const botMentioned = rawPrompt.includes('@' + cleanNumber) || rawPrompt.toLowerCase().includes('بوت') || msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.includes(cleanNumber + '@s.whatsapp.net');
-            const isReplyToMe = msg.message.extendedTextMessage?.contextInfo?.participant === cleanNumber + '@s.whatsapp.net';
-            if (!botMentioned && !isReplyToMe) return; 
+            const botId = cleanNumber + '@s.whatsapp.net';
+            const isMentioned = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.includes(botId) || rawPrompt.includes('@' + cleanNumber);
+            const isReplyToMe = msg.message.extendedTextMessage?.contextInfo?.participant === botId;
+            if (!isMentioned && !isReplyToMe) return;
         }
 
-        const finalPromptText = isGroup ? rawPrompt.replace(/@\d+\s*|يا بوت\s*|بوت\s*/gi, '').trim() : rawPrompt;
-        if (!finalPromptText) return;
-
-        if (isAdmin && ['المدير', 'تحكم', 'التحكم', '1', '2', '3', '4', '5'].includes(finalPromptText)) return;
-
-        // 🛡️ الفلاتر وتأخير الرد للمستخدمين العاديين فقط 
-        if (!isAdmin) {
-            const textLength = finalPromptText.replace(/\s+/g, '').length;
-            if (textLength < 3) return;
-
-            const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(finalPromptText);
-            if (!hasLettersOrNumbers) return;
-
-            await new Promise(resolve => setTimeout(resolve, 20000));
-        }
+        const finalPrompt = isGroup ? rawPrompt.replace(/@\d+\s*/g, '').trim() : rawPrompt;
+        if (!finalPrompt || finalPrompt.length < 2) return;
 
         try {
-            if (!isGroup) { await sock.readMessages([msg.key]); }
+            if (!isGroup) await sock.readMessages([msg.key]);
 
-            const foundCustomReply = customReplies.find(r => finalPromptText.includes(r.trigger));
-            if (foundCustomReply) { await simulateTypingAndSend(sock, sender, foundCustomReply.reply, isGroup ? msg : null); return; }
+            // 1. ردود مخصصة
+            const custom = customReplies.find(r => finalPrompt.includes(r.trigger));
+            if (custom) { await simulateTypingAndSend(sock, sender, custom.reply, isGroup ? msg : null); return; }
 
-            const learnedAnswer = checkLearnedQA(finalPromptText);
-            if (learnedAnswer) { await simulateTypingAndSend(sock, sender, learnedAnswer, isGroup ? msg : null); return; }
+            // 2. ردود متعلمة
+            const learned = checkLearnedQA(finalPrompt);
+            if (learned) { await simulateTypingAndSend(sock, sender, learned, isGroup ? msg : null); return; }
 
-            let aiReply;
-            try { aiReply = await executeGroqAI(sender, finalPromptText); } catch (error) {
-                if (error.code === 'ECONNABORTED' || (error.response && error.response.status === 429)) {
-                    pendingQueue.push({ sender, text: finalPromptText, isGroup, timestamp: Date.now() }); saveQueue(); return; 
-                } else { throw error; }
-            }
-
-            const wantsVoice = finalPromptText.includes('صوت') || finalPromptText.includes('تكلم') || finalPromptText.includes('اسمعني') || finalPromptText.includes('غني');
+            // 3. ذكاء اصطناعي
+            if (!isAdmin) await delay(5000 + Math.random() * 5000); // تأخير طبيعي
+            const aiReply = await executeGroqAI(sender, finalPrompt);
+            
+            const wantsVoice = ['صوت', 'تكلم', 'اسمعني', 'غني'].some(h => finalPrompt.includes(h));
             if (wantsVoice && !isGroup) {
-                await sock.sendMessage(sender, { text: "🎙️ ثواني..." });
-                await sock.sendPresenceUpdate('recording', sender); 
-                const clonedAudio = await generateDirectVoice(aiReply);
-                if (clonedAudio === "QUOTA_EXCEEDED") {
-                    await sock.sendMessage(sender, { text: aiReply }, { quoted: msg });
-                } else if (clonedAudio && fs.existsSync(clonedAudio)) {
-                    await sock.sendMessage(sender, { audio: { url: clonedAudio }, mimetype: 'audio/mpeg', ptt: true }, { quoted: msg });
-                    fs.unlinkSync(clonedAudio); 
-                }
-            } else { await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null); }
-        } catch (error) { console.error('خطأ:', error.message); }
+                await generateAndSendVoice(sock, sender, aiReply, msg);
+            } else {
+                await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null);
+            }
+        } catch (error) {
+            console.error('Error handling message:', error.message);
+        }
     });
 }
 
-async function initMatrix() {
-    if (connectedNumbers.length === 0) { connectedNumbers.push('584267454399'); saveNumbers(); }
-    for (let number of connectedNumbers) {
-        console.log(`⏳ جاري إقلاع خادم الرقم: [${number}]...`);
-        // استخدمنا adminNumbers[0] لجلب أول مسؤول تم تسجيله
-        await connectInstance(number, adminNumbers[0] ? adminNumbers[0] + '@s.whatsapp.net' : null);
+async function init() {
+    if (connectedNumbers.length === 0) connectedNumbers.push('584267454399');
+    for (const num of connectedNumbers) {
+        console.log(`⏳ جاري تشغيل البوت للرقم: ${num}`);
+        await connectInstance(num, adminNumbers[0] + '@s.whatsapp.net');
+        await delay(5000);
     }
 }
-initMatrix();
+init();
