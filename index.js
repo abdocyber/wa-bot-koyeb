@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => { res.send('البوت الذكي يعمل 🚀'); });
+app.get('/', (req, res) => { res.send('مصفوفة البوتات المتعددة تعمل بكفاءة سحابية 🚀'); });
 app.listen(port, () => { console.log(`🌐 خادم الويب يعمل على المنفذ ${port}`); });
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
@@ -10,15 +10,22 @@ const pino = require('pino');
 const fs = require('fs');
 const axios = require('axios');
 
-const botNumber = "584267454399"; 
-const adminNumber = '249121936350'; // تأكد أن هذا هو رقمك الذي تراسله منه
+// ================= 1. الإعدادات الأساسية والمفاتيح =================
+const adminNumber = '249121936350'; 
 const GROQ_API_KEY = "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"; 
 const ELEVENLABS_API_KEY = "2afb99725e888cd50cac9dc774db408a3a1a05a4c8ab1aa128fb3aacc5121715"; 
 const ELEVENLABS_VOICE_ID = "jAAHNNqlbAX9iWjJPEtE"; 
 
-let globalSock = null; 
+const activeSocks = new Map(); 
 const userConversations = new Map();
+const lastUserQuestion = new Map(); 
+
 let isBotActive = true; 
+let selfLearnEnabled = true;
+
+const numbersFile = './connected_numbers.json';
+let connectedNumbers = fs.existsSync(numbersFile) ? JSON.parse(fs.readFileSync(numbersFile, 'utf8')) : [];
+function saveNumbers() { fs.writeFileSync(numbersFile, JSON.stringify(connectedNumbers, null, 2)); }
 
 const repliesFile = './custom_replies.json';
 let customReplies = fs.existsSync(repliesFile) ? JSON.parse(fs.readFileSync(repliesFile, 'utf8')) : [];
@@ -28,7 +35,78 @@ const queueFile = './pending_questions.json';
 let pendingQueue = fs.existsSync(queueFile) ? JSON.parse(fs.readFileSync(queueFile, 'utf8')) : [];
 function saveQueue() { fs.writeFileSync(queueFile, JSON.stringify(pendingQueue, null, 2)); }
 
-// ================= محرك العقل البشري (محدث جذرياً) =================
+// ================= 2. دالة حساب التشابه =================
+function getSimilarity(str1, str2) {
+    const s1 = str1.toLowerCase().replace(/\s+/g, '');
+    const s2 = str2.toLowerCase().replace(/\s+/g, '');
+    if (s1 === s2) return 1.0;
+    if (s1.length < 2 || s2.length < 2) return 0.0;
+    
+    const bigrams1 = new Map();
+    for (let i = 0; i < s1.length - 1; i++) {
+        const bigram = s1.substr(i, 2);
+        bigrams1.set(bigram, (bigrams1.get(bigram) || 0) + 1);
+    }
+    
+    let intersection = 0;
+    for (let i = 0; i < s2.length - 1; i++) {
+        const bigram = s2.substr(i, 2);
+        if (bigrams1.has(bigram) && bigrams1.get(bigram) > 0) {
+            intersection++;
+            bigrams1.set(bigram, bigrams1.get(bigram) - 1);
+        }
+    }
+    return (2.0 * intersection) / (s1.length + s2.length - 2);
+}
+
+// ================= 3. التعلم الذاتي ومحاكاة النبرة =================
+function learnManualQA(question, answer) {
+    if (!selfLearnEnabled || !question || !answer) return;
+    let learned = fs.existsSync('./learned_qa.json') ? JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8')) : [];
+    let found = false;
+    
+    for (let item of learned) {
+        if (getSimilarity(item.question, question) > 0.85) {
+            item.answer = answer; found = true; break;
+        }
+    }
+    if (!found) learned.push({ question, answer, usageCount: 1 });
+    learned.sort((a, b) => b.usageCount - a.usageCount);
+    if (learned.length > 500) learned = learned.slice(0, 500);
+    fs.writeFileSync('./learned_qa.json', JSON.stringify(learned, null, 2));
+}
+
+function checkLearnedQA(question) {
+    if (!fs.existsSync('./learned_qa.json')) return null;
+    let learned = JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8'));
+    for (let item of learned) {
+        if (getSimilarity(item.question, question) > 0.80) {
+            item.usageCount++;
+            fs.writeFileSync('./learned_qa.json', JSON.stringify(learned, null, 2));
+            return item.answer;
+        }
+    }
+    return null;
+}
+
+function getOwnerStyleGuide() {
+    if (!fs.existsSync('./learned_qa.json')) return "";
+    let learned = JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8'));
+    if (learned.length === 0) return "";
+    let samples = learned.slice(0, 10).map(item => `- سأل العميل: "${item.question}" -> فكان ردك: "${item.answer}"`).join('\n');
+    return `\nدليل إرشادي لنبرة الحساب الحقيقي:\n${samples}`;
+}
+
+function trackChat(jid) {
+    if (!jid || jid.endsWith('@g.us')) return; 
+    let chats = fs.existsSync('./known_chats.json') ? JSON.parse(fs.readFileSync('./known_chats.json', 'utf8')) : [];
+    if (!chats.includes(jid)) {
+        chats.push(jid);
+        fs.writeFileSync('./known_chats.json', JSON.stringify(chats, null, 2));
+    }
+}
+
+// ================= 4. محرك Groq AI الذكي =================
 async function executeGroqAI(sender, userMessage) {
     if (!userConversations.has(sender)) userConversations.set(sender, []);
     let history = userConversations.get(sender);
@@ -36,27 +114,25 @@ async function executeGroqAI(sender, userMessage) {
     if (history.length > 0 && history[history.length - 1].role === "user") history.pop(); 
     if (history.length > 20) history = history.slice(history.length - 20); 
 
-    const humanPersona = `أنت لست ذكاءً اصطناعياً ولا روبوتاً. أنت إنسان عربي (تتحدث بلهجة المتحدث، مثلاً سوداني إذا كان سودانياً) تدردش مع صاحبك على الواتساب.
-قواعدك الصارمة جداً:
-1. ردودك قصيرة، عفوية، ومختصرة (سطر أو سطرين كحد أقصى).
-2. تحدث بلهجة طبيعية جداً. إذا كلمك بالعامية، رد بالعامية الدارجة.
-3. ممنوع نهائياً استخدام اللغة الفصحى المعقدة، وممنوع استخدام أي لغة غير العربية (لا هندية ولا إنجليزية).
-4. ممنوع كتابة أي مؤثرات صوتية، أو أقواس مثل (يضحك) أو (صوت كذا).
-5. تفاعل بمشاعر حقيقية وبمنطق. إذا مزح امزح، وإذا كان حزيناً واسه.
-6. لا تعتذر أبداً. إذا طلب منك أغنية، اكتب كلمات بسيطة منها كأنك تدندنها بأسلوبك.`;
+    const LONG_ANSWER_HINTS = ['اشرح', 'تفصيل', 'قصة', 'أغنية', 'اغنيه', 'غني', 'وصف', 'وضح', 'لماذا', 'كيف'];
+    const needsLongAnswer = LONG_ANSWER_HINTS.some(hint => userMessage.toLowerCase().includes(hint));
+    const maxTokens = needsLongAnswer ? 1024 : 200;
 
-    let messages = [{ role: "system", content: humanPersona }, ...history, { role: "user", content: userMessage }];
+    const ownerStyleGuide = getOwnerStyleGuide();
+
+    const strictPersona = `أنت صديق دردشة بشري حقيقي وعفوي يدردش مع أصحابه على الواتساب.
+1. ردودك قصيرة جداً ومباشرة (سطر أو سطرين فقط).
+2. تحدث بلهجة عربية عامية وعفوية تماماً تطابق السائل.
+3. ممنوع نهائياً كتابة مؤثرات بين أقواس مثل (يضحك) أو (صوت).
+4. لا تعتذر عن إرسال الصوتيات، اكتب الكلمات مباشرة وسيتولى النظام تحويلها.
+${ownerStyleGuide}`;
+
+    let messages = [{ role: "system", content: strictPersona }, ...history, { role: "user", content: userMessage }];
 
     try {
         let response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-            model: "llama-3.3-70b-versatile", 
-            messages: messages,
-            temperature: 0.8 // حرارة مرتفعة قليلاً ليكون بشرياً ومبدعاً
-        }, {
-            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 20000 
-        });
-
+            model: "llama-3.3-70b-versatile", messages, temperature: 0.75, max_tokens: maxTokens
+        }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 20000 });
         const aiReply = response.data.choices[0].message.content.trim();
         history.push({ role: "user", content: userMessage });
         history.push({ role: "assistant", content: aiReply });
@@ -64,21 +140,7 @@ async function executeGroqAI(sender, userMessage) {
     } catch (error) { throw error; }
 }
 
-setInterval(async () => {
-    if (pendingQueue.length === 0 || !globalSock || !isBotActive) return;
-    const item = pendingQueue[0]; 
-    try {
-        let aiReply = await executeGroqAI(item.sender, item.text);
-        await simulateTypingAndSend(globalSock, item.sender, aiReply);
-        pendingQueue.shift(); saveQueue();
-    } catch (error) {
-        if (error.response && error.response.status === 429) {
-            console.log(`[زحام] تأجيل...`);
-        } else { pendingQueue.shift(); saveQueue(); }
-    }
-}, 60000);
-
-// ================= محرك الصوت =================
+// ================= 5. الصوتيات والبث =================
 async function generateDirectVoice(text) {
     const tempMp3 = `./voice_${Date.now()}.mp3`;
     const cleanText = text.replace(/[\(\[].*?[\)\]]/g, '').trim(); 
@@ -89,11 +151,8 @@ async function generateDirectVoice(text) {
             headers: { 'accept': 'audio/mpeg', 'xi-api-key': ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
             responseType: 'arraybuffer'
         });
-        fs.writeFileSync(tempMp3, response.data);
-        return tempMp3; 
-    } catch (err) { 
-        return "QUOTA_EXCEEDED"; // إرجاع كود الخطأ لمعرفته
-    }
+        fs.writeFileSync(tempMp3, response.data); return tempMp3; 
+    } catch (err) { return "QUOTA_EXCEEDED"; }
 }
 
 async function simulateTypingAndSend(sock, to, text, quotedMsg) {
@@ -103,122 +162,169 @@ async function simulateTypingAndSend(sock, to, text, quotedMsg) {
     await sock.sendMessage(to, { text: text }, quotedMsg ? { quoted: quotedMsg } : {});
 }
 
-async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const sock = makeWASocket({ 
+async function executeBroadcast(sock, message) {
+    if (!fs.existsSync('./known_chats.json')) return { success: 0, total: 0 };
+    let chats = JSON.parse(fs.readFileSync('./known_chats.json', 'utf8'));
+    let successCount = 0;
+    for (let chat of chats) {
+        try {
+            await new Promise(resolve => setTimeout(resolve, 3500));
+            await sock.sendMessage(chat, { text: message }); successCount++;
+        } catch (err) { }
+    }
+    return { success: successCount, total: chats.length };
+}
+
+// ================= 6. الجلسات المتعددة وفلاتر الحماية =================
+async function connectInstance(phoneNumber, notifyJid = null) {
+    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+    const sessionFolder = `auth_info_${cleanNumber}`;
+    
+    const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
+    const sock = makeWASocket({
         auth: state, printQRInTerminal: false, browser: ['Ubuntu', 'Chrome', '20.0.04'], logger: pino({ level: 'silent' }),
         keepAliveIntervalMs: 30000, markOnlineOnConnect: true
     });
-    globalSock = sock; 
+
+    activeSocks.set(cleanNumber, sock);
 
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
-                const phoneNumber = botNumber.replace(/[^0-9]/g, '');
-                const code = await sock.requestPairingCode(phoneNumber);
-                console.log(`\n🚨 كود الربط: ${code}\n`);
-            } catch (err) {}
-        }, 5000);
+                const code = await sock.requestPairingCode(cleanNumber);
+                if (notifyJid) {
+                    await activeSocks.get(connectedNumbers[0])?.sendMessage(notifyJid, {
+                        text: `🔑 *كود الربط للحساب الجديد:*\nالرقم: \`${cleanNumber}\`\nالكود: *${code}*`
+                    });
+                }
+            } catch (err) { }
+        }, 6000);
     }
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) connectToWhatsApp();
-        } else if (connection === 'open') { console.log('\n✅ البوت يعمل.\n'); }
+            if (shouldReconnect) connectInstance(cleanNumber);
+        } else if (connection === 'open') {
+            if (!connectedNumbers.includes(cleanNumber)) {
+                connectedNumbers.push(cleanNumber); saveNumbers();
+            }
+        }
     });
 
     sock.ev.on('messages.upsert', async m => {
-        const msg = m.messages[0];
-        if (!msg.message) return; 
+        const msg = m.messages[0]; if (!msg.message) return; 
 
         const rawSender = msg.key.remoteJid;
-        const cleanNumber = rawSender.replace(/[^0-9]/g, ''); 
-        const isAdmin = cleanNumber.includes(adminNumber);
+        const senderNumber = rawSender.replace(/[^0-9]/g, ''); 
+        const isAdmin = senderNumber.includes(adminNumber);
         
         const sender = rawSender.includes(':') ? rawSender.split(':')[0] + '@s.whatsapp.net' : rawSender;
         const isFromMe = msg.key.fromMe;
-        const isGroup = sender.endsWith('@g.us'); 
+        const isGroup = rawSender.endsWith('@g.us'); 
         
         let incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const rawPrompt = incomingText.trim();
 
-        // ------------------ لوحة تحكم المشرف (كلمات واضحة بدون رموز) ------------------
+        if (isFromMe && !isGroup) {
+            const lastQuestion = lastUserQuestion.get(sender);
+            if (lastQuestion && rawPrompt) { learnManualQA(lastQuestion, rawPrompt); lastUserQuestion.delete(sender); }
+            return;
+        }
+
+        if (!isGroup && !isFromMe) { trackChat(sender); lastUserQuestion.set(sender, rawPrompt); }
+
         if (isAdmin && !isGroup) {
-            if (rawPrompt === 'المدير' || rawPrompt === 'تحكم') {
-                const menu = `🤖 *لوحة التحكم* 🤖\nالحالة: ${isBotActive ? '✅' : '❌'}\n\nعلمني [الكلمة] | [الرد]\nانسى [الكلمة]\nالردود\nإيقاف\nتشغيل`;
+            if (rawPrompt === 'المدير' || rawPrompt === 'تحكم' || rawPrompt === 'لوحة التحكم') {
+                let learnedCount = fs.existsSync('./learned_qa.json') ? JSON.parse(fs.readFileSync('./learned_qa.json', 'utf8')).length : 0;
+                const menu = `🛠️ *لوحة التحكم* 🛠️\nالحالة: ${isBotActive ? '✅' : '❌'}\nالتعلم: ${selfLearnEnabled ? '🔄' : '⏸️'}\nالردود: *${learnedCount}*\n\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\n\nاضافة [الرقم]\nاذاعة [الرسالة]\nعلمني [السؤال]|[الرد]\nانسى [الكلمة]`;
                 await sock.sendMessage(sender, { text: menu }); return;
             }
-            if (rawPrompt === 'إيقاف' || rawPrompt === 'ايقاف') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ تم الإيقاف.' }); return; }
-            if (rawPrompt === 'تشغيل') { isBotActive = true; await sock.sendMessage(sender, { text: '✅ تم التشغيل.' }); return; }
-            if (rawPrompt === 'الردود') {
-                if (customReplies.length === 0) { await sock.sendMessage(sender, { text: 'لا توجد ردود.' }); return; }
-                let msgText = '*الردود:*\n'; customReplies.forEach((r, i) => msgText += `${i+1}. ${r.trigger} -> ${r.reply}\n`);
-                await sock.sendMessage(sender, { text: msgText }); return;
-            }
+            if (rawPrompt === '1') { isBotActive = true; await sock.sendMessage(sender, { text: '✅ تشغيل' }); return; }
+            if (rawPrompt === '2') { isBotActive = false; await sock.sendMessage(sender, { text: '❌ إيقاف' }); return; }
+            if (rawPrompt === '3') { selfLearnEnabled = true; await sock.sendMessage(sender, { text: '🔄 تعلم مفعل' }); return; }
+            if (rawPrompt === '4') { selfLearnEnabled = false; await sock.sendMessage(sender, { text: '⏸️ تعلم متوقف' }); return; }
+            if (rawPrompt === '5') { fs.writeFileSync('./learned_qa.json', JSON.stringify([], null, 2)); await sock.sendMessage(sender, { text: '🗑️ مسح الذاكرة' }); return; }
+            if (rawPrompt.startsWith('اضافة ')) { connectInstance(rawPrompt.replace('اضافة ', '').replace(/[^0-9]/g, ''), sender); return; }
+            if (rawPrompt.startsWith('اذاعة ')) { executeBroadcast(sock, rawPrompt.replace('اذاعة ', '').trim()); await sock.sendMessage(sender, { text: `📢 جاري البث...` }); return; }
             if (rawPrompt.startsWith('علمني ')) {
-                const data = rawPrompt.replace('علمني ', '').split('|');
-                if (data.length < 2) return;
+                const data = rawPrompt.replace('علمني ', '').split('|'); if (data.length < 2) return;
                 customReplies = customReplies.filter(r => r.trigger !== data[0].trim());
                 customReplies.push({ trigger: data[0].trim(), reply: data[1].trim() }); saveReplies();
-                await sock.sendMessage(sender, { text: `✅ تم الحفظ!` }); return;
+                await sock.sendMessage(sender, { text: `✅ تم` }); return;
             }
             if (rawPrompt.startsWith('انسى ')) {
-                const target = rawPrompt.replace('انسى ', '').trim();
-                customReplies = customReplies.filter(r => r.trigger !== target); saveReplies();
-                await sock.sendMessage(sender, { text: `🗑️ تم المسح.` }); return;
+                customReplies = customReplies.filter(r => r.trigger !== rawPrompt.replace('انسى ', '').trim()); saveReplies();
+                await sock.sendMessage(sender, { text: `🗑️ مسح` }); return;
             }
         }
 
-        if (isFromMe || (isGroup && !rawPrompt.toLowerCase().includes('يا بوت'))) return;
-        if (!isBotActive && !isAdmin) return; 
+        if (isFromMe || (!isBotActive && !isAdmin)) return; 
 
-        const finalPromptText = isGroup ? rawPrompt.replace(/^يا بوت/i, '').trim() : rawPrompt;
-        if (!finalPromptText) return; 
-        
-        // منع الكلمات الإدارية من الذهاب للذكاء الاصطناعي
-        if (isAdmin && (finalPromptText === 'المدير' || finalPromptText === 'تحكم' || finalPromptText === 'الردود' || finalPromptText === 'إيقاف' || finalPromptText === 'تشغيل')) return;
+        if (isGroup) {
+            const botMentioned = rawPrompt.includes('@' + cleanNumber) || rawPrompt.toLowerCase().includes('بوت') || msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.includes(cleanNumber + '@s.whatsapp.net');
+            const isReplyToMe = msg.message.extendedTextMessage?.contextInfo?.participant === cleanNumber + '@s.whatsapp.net';
+            if (!botMentioned && !isReplyToMe) return; 
+        }
+
+        const finalPromptText = isGroup ? rawPrompt.replace(/@\d+\s*|يا بوت\s*|بوت\s*/gi, '').trim() : rawPrompt;
+        if (!finalPromptText) return;
+
+        if (isAdmin && ['المدير', 'تحكم', '1', '2', '3', '4', '5'].includes(finalPromptText)) return;
+
+        // 🛡️ --- الفلاتر وتأخير الرد للمستخدمين العاديين فقط --- 🛡️
+        if (!isAdmin) {
+            // 1. حساب طول الرسالة بدون مسافات وتجاهل الأقل من 3 حروف
+            const textLength = finalPromptText.replace(/\s+/g, '').length;
+            if (textLength < 3) return;
+
+            // 2. التحقق من وجود حرف أو رقم واحد على الأقل (تجاهل الرسائل التي تتكون من رموز وعلامات فقط)
+            const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(finalPromptText);
+            if (!hasLettersOrNumbers) return;
+
+            // 3. محاكاة البشر: انتظار 20 ثانية قبل التفاعل تماماً ⏳
+            await new Promise(resolve => setTimeout(resolve, 20000));
+        }
 
         try {
             if (!isGroup) { await sock.readMessages([msg.key]); }
 
             const foundCustomReply = customReplies.find(r => finalPromptText.includes(r.trigger));
-            if (foundCustomReply) {
-                await simulateTypingAndSend(sock, sender, foundCustomReply.reply, isGroup ? msg : null);
-                return; 
-            }
+            if (foundCustomReply) { await simulateTypingAndSend(sock, sender, foundCustomReply.reply, isGroup ? msg : null); return; }
+
+            const learnedAnswer = checkLearnedQA(finalPromptText);
+            if (learnedAnswer) { await simulateTypingAndSend(sock, sender, learnedAnswer, isGroup ? msg : null); return; }
 
             let aiReply;
-            try {
-                aiReply = await executeGroqAI(sender, finalPromptText);
-            } catch (error) {
+            try { aiReply = await executeGroqAI(sender, finalPromptText); } catch (error) {
                 if (error.code === 'ECONNABORTED' || (error.response && error.response.status === 429)) {
-                    pendingQueue.push({ sender, text: finalPromptText, isGroup, timestamp: Date.now() }); saveQueue();
-                    return; 
+                    pendingQueue.push({ sender, text: finalPromptText, isGroup, timestamp: Date.now() }); saveQueue(); return; 
                 } else { throw error; }
             }
 
             const wantsVoice = finalPromptText.includes('صوت') || finalPromptText.includes('تكلم') || finalPromptText.includes('اسمعني') || finalPromptText.includes('غني');
-            
             if (wantsVoice && !isGroup) {
                 await sock.sendMessage(sender, { text: "🎙️ ثواني..." });
                 await sock.sendPresenceUpdate('recording', sender); 
-                
                 const clonedAudio = await generateDirectVoice(aiReply);
-                
                 if (clonedAudio === "QUOTA_EXCEEDED") {
-                    await sock.sendMessage(sender, { text: "يا صاحبي رصيدي في سيرفر الصوت خلص 😅، لازم تجدد مفتاح (ElevenLabs) عشان أقدر أسجل صوت تاني. خذ الرد كتابة مؤقتاً:\n\n" + aiReply }, { quoted: msg });
+                    await sock.sendMessage(sender, { text: aiReply }, { quoted: msg });
                 } else if (clonedAudio && fs.existsSync(clonedAudio)) {
                     await sock.sendMessage(sender, { audio: { url: clonedAudio }, mimetype: 'audio/mpeg', ptt: true }, { quoted: msg });
                     fs.unlinkSync(clonedAudio); 
                 }
-            } else {
-                await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null);
-            }
-
+            } else { await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null); }
         } catch (error) { console.error('خطأ:', error.message); }
     });
 }
-connectToWhatsApp();
+
+async function initMatrix() {
+    if (connectedNumbers.length === 0) { connectedNumbers.push('584267454399'); saveNumbers(); }
+    for (let number of connectedNumbers) {
+        console.log(`⏳ جاري إقلاع خادم الرقم: [${number}]...`);
+        await connectInstance(number);
+    }
+}
+initMatrix();
