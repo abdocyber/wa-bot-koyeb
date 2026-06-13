@@ -153,7 +153,9 @@ async function simulateTypingAndSend(sock, to, text, quotedMsg) {
 // ================= 5. الجلسات والاتصال =================
 async function connectInstance(phoneNumber, notifyJid = null) {
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    const sessionFolder = path.join(DATA_DIR, `auth_info_${cleanNumber}`);
+    
+    // تم تغيير اسم المجلد لتجاوز الحظر وتلف الجلسات السابق
+    const sessionFolder = path.join(DATA_DIR, `session_secure_${cleanNumber}`);
     
     const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
     const sock = makeWASocket({
@@ -176,17 +178,27 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             console.log(`✅ تم فتح اتصال الرقم: ${cleanNumber}`);
         }
         
-        if (update.qr) {
-            const code = await sock.requestPairingCode(cleanNumber);
-            console.log(`🚨 كود الربط للرقم [${cleanNumber}] هو: ${code}`);
-            if (notifyJid) {
-                for (let [num, s] of activeSocks.entries()) {
-                    if (s.authState.creds.registered) {
-                        await s.sendMessage(notifyJid, { text: `🔑 *كود الربط للحساب الجديد:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*` });
-                        break;
+        // التقاط كود الربط وطباعته وإرساله
+        if (!sock.authState.creds.registered && update.isOnline === undefined) {
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(cleanNumber);
+                    console.log(`\n======================================================`);
+                    console.log(`🚨 كود الربط للرقم [${cleanNumber}] هو: ${code} 🚨`);
+                    console.log(`======================================================\n`);
+                    
+                    if (notifyJid) {
+                        for (let [num, s] of activeSocks.entries()) {
+                            if (s.authState.creds.registered) {
+                                await s.sendMessage(notifyJid, { text: `🔑 *كود الربط للحساب الجديد:* \nالرقم: \`${cleanNumber}\`\nالكود: *${code}*` });
+                                break;
+                            }
+                        }
                     }
+                } catch (err) {
+                    console.log(`❌ خطأ في توليد كود الربط:`, err.message); 
                 }
-            }
+            }, 6000);
         }
     });
 
@@ -267,9 +279,14 @@ async function connectInstance(phoneNumber, notifyJid = null) {
                 const text = customReplies.map(r => `• *${r.trigger}:* ${r.reply}`).join('\n') || 'لا توجد ردود.';
                 await sock.sendMessage(sender, { text: `*الردود المخصصة:*\n${text}` }); return;
             }
+            // يمكن للمشرف رؤية الأرقام المسجلة
+            if (rawPrompt === 'عرض الأرقام') {
+                const text = connectedNumbers.map((n, i) => `${i+1}. ${n}`).join('\n') || 'لا توجد أرقام مسجلة.';
+                await sock.sendMessage(sender, { text: `*الأرقام المتصلة:*\n${text}` }); return;
+            }
         }
 
-        // --- معالجة الرسائل للمستخدمين ---
+        // --- معالجة الرسائل للمستخدمين (الفلاتر والذكاء الاصطناعي) ---
         if (isFromMe || (!isBotActive && !isAdmin)) return; 
 
         if (isGroup) {
@@ -280,10 +297,20 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         }
 
         const finalPrompt = isGroup ? rawPrompt.replace(/@\d+\s*/g, '').trim() : rawPrompt;
-        if (!finalPrompt || finalPrompt.length < 2) return;
+        
+        // استبعاد الرسائل القصيرة جداً، والرموز، وأوامر الإدارة
+        if (!finalPrompt || finalPrompt.replace(/\s+/g, '').length < 3) return;
+        const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(finalPrompt);
+        if (!hasLettersOrNumbers) return;
+        if (['المدير', 'تحكم', 'التحكم', 'لوحة التحكم', '1', '2', '3', '4', '5'].includes(finalPrompt)) return;
 
         try {
             if (!isGroup) await sock.readMessages([msg.key]);
+
+            // تأخير متعمد بـ 20 ثانية للمستخدمين العاديين لمحاكاة السلوك البشري
+            if (!isAdmin) {
+                await delay(20000); 
+            }
 
             // 1. ردود مخصصة
             const custom = customReplies.find(r => finalPrompt.includes(r.trigger));
@@ -294,11 +321,11 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             if (learned) { await simulateTypingAndSend(sock, sender, learned, isGroup ? msg : null); return; }
 
             // 3. ذكاء اصطناعي
-            if (!isAdmin) await delay(5000 + Math.random() * 5000); // تأخير طبيعي
             const aiReply = await executeGroqAI(sender, finalPrompt);
             
             const wantsVoice = ['صوت', 'تكلم', 'اسمعني', 'غني'].some(h => finalPrompt.includes(h));
             if (wantsVoice && !isGroup) {
+                await sock.sendMessage(sender, { text: "🎙️ ثواني، بسجل لك المقطع..." });
                 await generateAndSendVoice(sock, sender, aiReply, msg);
             } else {
                 await simulateTypingAndSend(sock, sender, aiReply, isGroup ? msg : null);
@@ -309,12 +336,17 @@ async function connectInstance(phoneNumber, notifyJid = null) {
     });
 }
 
+// ================= إقلاع النظام الأساسي =================
 async function init() {
-    if (connectedNumbers.length === 0) connectedNumbers.push('584267454399');
+    if (connectedNumbers.length === 0) {
+        connectedNumbers.push('584267454399');
+        saveJSON('connected_numbers.json', connectedNumbers);
+    }
+    
     for (const num of connectedNumbers) {
-        console.log(`⏳ جاري تشغيل البوت للرقم: ${num}`);
-        await connectInstance(num, adminNumbers[0] + '@s.whatsapp.net');
-        await delay(5000);
+        console.log(`⏳ جاري تهيئة وتشغيل البوت للرقم: ${num}`);
+        await connectInstance(num, adminNumbers[0] ? adminNumbers[0] + '@s.whatsapp.net' : null);
+        await delay(5000); // فاصل زمني لتجنب الضغط على السيرفر أثناء إقلاع عدة أرقام
     }
 }
 init();
