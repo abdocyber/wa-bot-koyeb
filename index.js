@@ -41,6 +41,9 @@ let pendingQueue = loadJSON('pending_queue.json', []);
 let learnedQA = loadJSON('learned_qa.json', []);
 let knownChats = loadJSON('known_chats.json', []);
 
+// 🆕 إضافة مهلة الرد وحفظها (القيمة الافتراضية 20 ثانية كما كان الكود السابق)
+let replyDelaySeconds = loadJSON('reply_delay.json', 20);
+
 // ================= 3. دالة حساب التشابه والتعلم =================
 function getSimilarity(str1, str2) {
     const s1 = str1.toLowerCase().replace(/\s+/g, '');
@@ -235,7 +238,8 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         if (isAdmin && !isGroup) {
             // --- لوحة التحكم ---
             if (['المدير', 'تحكم', 'التحكم', 'لوحة التحكم'].includes(rawPrompt)) {
-                const menu = `🛠️ *لوحة التحكم المتقدمة* 🛠️\n\n*الحالة:* ${isBotActive ? '✅ يعمل' : '❌ متوقف'}\n*التعلم:* ${selfLearnEnabled ? '🔄 مفعل' : '⏸️ متوقف'}\n*الردود:* ${learnedQA.length}\n*البوتات:* ${connectedNumbers.length}\n\n*الأوامر:*\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\n\nاضافة [الرقم] | حذف رقم [الرقم]\nاضافة مشرف [الرقم] | حذف مشرف [الرقم]\nعرض الأرقام | عرض المشرفين | عرض الردود\nعلمني [سؤال]|[جواب] | انسى [كلمة]\nاذاعة [رسالة]`;
+                // 🆕 تم تحديث القائمة لإظهار حالة المهلة وإضافة الأمر الخاص بها
+                const menu = `🛠️ *لوحة التحكم المتقدمة* 🛠️\n\n*الحالة:* ${isBotActive ? '✅ يعمل' : '❌ متوقف'}\n*التعلم:* ${selfLearnEnabled ? '🔄 مفعل' : '⏸️ متوقف'}\n*الردود:* ${learnedQA.length}\n*البوتات:* ${connectedNumbers.length}\n*المهلة:* ⏳ ${replyDelaySeconds} ثانية\n\n*الأوامر:*\n1: تشغيل | 2: إيقاف\n3: تفعيل التعلم | 4: إيقاف التعلم\n5: تصفير الذاكرة\nمهلة [الرقم] | لتحديد التأخير\n\nاضافة [الرقم] | حذف رقم [الرقم]\nاضافة مشرف [الرقم] | حذف مشرف [الرقم]\nعرض الأرقام | عرض المشرفين | عرض الردود\nعلمني [سؤال]|[جواب] | انسى [كلمة]\nاذاعة [رسالة]`;
                 await sock.sendMessage(sender, { text: menu }); return;
             }
             if (rawPrompt === '1') { isBotActive = true; await sock.sendMessage(sender, { text: '✅ تم التشغيل' }); return; }
@@ -244,6 +248,19 @@ async function connectInstance(phoneNumber, notifyJid = null) {
             if (rawPrompt === '4') { selfLearnEnabled = false; await sock.sendMessage(sender, { text: '⏸️ التعلم متوقف' }); return; }
             if (rawPrompt === '5') { learnedQA = []; saveJSON('learned_qa.json', []); await sock.sendMessage(sender, { text: '🗑️ تم تصفير الذاكرة' }); return; }
             
+            // 🆕 أمر تحديث المهلة من لوحة التحكم
+            if (rawPrompt.startsWith('مهلة ')) {
+                const delayNum = parseInt(rawPrompt.replace('مهلة ', '').trim());
+                if (!isNaN(delayNum) && delayNum >= 0) {
+                    replyDelaySeconds = delayNum;
+                    saveJSON('reply_delay.json', replyDelaySeconds);
+                    await sock.sendMessage(sender, { text: `✅ تم تعيين مهلة الرد إلى ${delayNum} ثانية بنجاح.` });
+                } else {
+                    await sock.sendMessage(sender, { text: `⚠️ خطأ: يرجى إدخال رقم صحيح. (مثال: مهلة 5)` });
+                }
+                return;
+            }
+
             if (rawPrompt.startsWith('اضافة ')) { connectInstance(rawPrompt.replace('اضافة ', '').replace(/[^0-9]/g, ''), sender); return; }
             if (rawPrompt.startsWith('حذف رقم ')) {
                 const num = rawPrompt.replace('حذف رقم ', '').replace(/[^0-9]/g, '');
@@ -303,13 +320,15 @@ async function connectInstance(phoneNumber, notifyJid = null) {
         const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(finalPrompt);
         if (!hasLettersOrNumbers) return;
         if (['المدير', 'تحكم', 'التحكم', 'لوحة التحكم', '1', '2', '3', '4', '5'].includes(finalPrompt)) return;
+        // 🆕 منع المستخدمين العاديين من تفعيل مهلة عن طريق الصدفة
+        if (finalPrompt.startsWith('مهلة ') && isAdmin) return; 
 
         try {
             if (!isGroup) await sock.readMessages([msg.key]);
 
-            // تأخير متعمد بـ 20 ثانية للمستخدمين العاديين لمحاكاة السلوك البشري
-            if (!isAdmin) {
-                await delay(20000); 
+            // 🆕 تأخير الرد بناءً على القيمة التي حددها المشرف عبر لوحة التحكم
+            if (!isAdmin && replyDelaySeconds > 0) {
+                await delay(replyDelaySeconds * 1000); 
             }
 
             // 1. ردود مخصصة
